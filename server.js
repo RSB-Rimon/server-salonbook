@@ -1,11 +1,11 @@
-
+﻿
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 5000;
 
 // Middleware
 app.use(express.json());
@@ -27,6 +27,8 @@ export async function connectToMongoDB() {
 
 // Connect to MongoDB
 await connectToMongoDB();
+const mongoClient = await connectToMongoDB();
+const db = mongoClient.db("salonbookDB");
 
 // Home route
 app.get("/", (req, res) => {
@@ -37,3 +39,4 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
 });
+
