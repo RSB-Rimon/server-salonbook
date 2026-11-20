@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { ObjectId } from "mongodb";
+import multer from "multer";
 
 const SERVICE_STATUSES = ["active", "inactive"];
 
@@ -152,6 +153,105 @@ function readServiceId(req, res) {
   return new ObjectId(serviceId);
 }
 
+const serviceImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+  },
+  fileFilter(req, file, callback) {
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return callback(new Error("Choose a JPG, PNG, or WEBP image."));
+    }
+    return callback(null, true);
+  },
+});
+
+function receiveServiceImage(req, res, next) {
+  serviceImageUpload.single("image")(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const statusCode = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+      return res.status(statusCode).json({ message: "The image upload is invalid or too large." });
+    }
+
+    if (error) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    return next();
+  });
+}
+
+function hasValidImageSignature(file) {
+  const buffer = file.buffer;
+
+  if (file.mimetype === "image/jpeg") {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+
+  if (file.mimetype === "image/png") {
+    return buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+
+  if (file.mimetype === "image/webp") {
+    return buffer.toString("ascii", 0, 4) === "RIFF" &&
+      buffer.toString("ascii", 8, 12) === "WEBP";
+  }
+
+  return false;
+}
+
+async function uploadServiceImageToImgBB(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ message: "Choose an image to upload." });
+  }
+
+  if (!hasValidImageSignature(req.file)) {
+    return res.status(400).json({ message: "The selected file is not a valid image." });
+  }
+
+  const apiKey = process.env.IMGBB_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ message: "Image upload is not configured on the server." });
+  }
+
+  try {
+    const extension = req.file.mimetype === "image/jpeg"
+      ? "jpg"
+      : req.file.mimetype === "image/png"
+        ? "png"
+        : "webp";
+    const formData = new FormData();
+    formData.append(
+      "image",
+      new Blob([req.file.buffer], { type: req.file.mimetype }),
+      "salon-service." + extension
+    );
+
+    const uploadResponse = await fetch(
+      "https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey),
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+    const uploadResult = await uploadResponse.json();
+
+    if (
+      !uploadResponse.ok ||
+      uploadResult.success !== true ||
+      typeof uploadResult.data?.url !== "string" ||
+      !uploadResult.data.url.startsWith("https://")
+    ) {
+      return res.status(502).json({ message: "The image host could not save this image." });
+    }
+
+    return res.status(201).json({ imageUrl: uploadResult.data.url });
+  } catch {
+    return res.status(502).json({ message: "The image host could not be reached." });
+  }
+}
 export function createServicesRouter({ db, requireAuth, requireRole }) {
   const router = Router();
   const services = db.collection("services");
@@ -266,5 +366,12 @@ export function createServicesRouter({ db, requireAuth, requireRole }) {
     }
   );
 
+  router.post(
+    "/admin/service-images",
+    requireAuth,
+    requireRole("admin"),
+    receiveServiceImage,
+    uploadServiceImageToImgBB
+  );
   return router;
 }
